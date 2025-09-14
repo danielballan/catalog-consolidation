@@ -14,3 +14,4 @@ with Context.from_app(app) as context:
     b = a.create_container("b")
     c = b.create_container("c")
     d = c.write_array([1, 2, 3], key="d")
+    a.update_metadata({"color": "blue"})

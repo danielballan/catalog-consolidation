@@ -39,15 +39,22 @@ DO $$
 DECLARE
     max_node_id BIGINT;
     max_data_source_id BIGINT;
+    max_asset_id BIGINT;
+    max_revision_id BIGINT;
 BEGIN
     SELECT COALESCE(MAX(id), 0) INTO max_node_id FROM nodes;
     SELECT COALESCE(MAX(id), 0) INTO max_data_source_id FROM data_sources;
-    
-    RAISE NOTICE 'Max IDs in dst - nodes: %, data_sources: %', max_node_id, max_data_source_id;
-    
+    SELECT COALESCE(MAX(id), 0) INTO max_asset_id FROM assets;
+    SELECT COALESCE(MAX(id), 0) INTO max_revision_id FROM revisions;
+
+    RAISE NOTICE 'Max IDs in dst - nodes: %, data_sources: %, assets: %, revisions: %',
+                 max_node_id, max_data_source_id, max_asset_id, max_revision_id;
+
     PERFORM set_config('migration.node_offset', max_node_id::text, false);
     PERFORM set_config('migration.data_source_offset', max_data_source_id::text, false);
-    PERFORM set_config('migration.graft_parent', '1', false);  -- Set graft parent here
+    PERFORM set_config('migration.asset_offset', max_asset_id::text, false);
+    PERFORM set_config('migration.revision_offset', max_revision_id::text, false);
+    PERFORM set_config('migration.graft_parent', :'graft_parent_id', false);
 END $$;
 
 -- =============================================================================
@@ -66,9 +73,23 @@ CREATE TEMPORARY TABLE data_source_mapping (
     new_id BIGINT UNIQUE
 );
 
+DROP TABLE IF EXISTS asset_mapping;
+CREATE TEMPORARY TABLE asset_mapping (
+    old_id BIGINT PRIMARY KEY,
+    new_id BIGINT UNIQUE
+);
+
+DROP TABLE IF EXISTS revision_mapping;
+CREATE TEMPORARY TABLE revision_mapping (
+    old_id BIGINT PRIMARY KEY,
+    new_id BIGINT UNIQUE
+);
+
 -- =============================================================================
--- BUILD NODE MAPPINGS (EXCLUDE ROOT NODE)
+-- BUILD MAPPINGS
 -- =============================================================================
+
+-- Build node mappings
 INSERT INTO node_mapping (old_id, new_id, new_parent)
 SELECT 
     n.id as old_id,
@@ -80,14 +101,29 @@ SELECT
 FROM foreign_src.nodes n
 WHERE n.parent IS NOT NULL;  -- EXCLUDE root node (parent IS NULL)
 
--- =============================================================================
--- BUILD DATA_SOURCE MAPPINGS  
--- =============================================================================
+-- Build data_source mappings
 INSERT INTO data_source_mapping (old_id, new_id)
 SELECT 
     ds.id,
     ds.id + current_setting('migration.data_source_offset')::BIGINT
 FROM foreign_src.data_sources ds;
+
+-- Build asset mappings (only assets used by migrated data_sources)
+INSERT INTO asset_mapping (old_id, new_id)
+SELECT DISTINCT
+    a.id,
+    a.id + current_setting('migration.asset_offset')::BIGINT
+FROM foreign_src.assets a
+JOIN foreign_src.data_source_asset_association dsaa ON a.id = dsaa.asset_id
+JOIN data_source_mapping dsm ON dsaa.data_source_id = dsm.old_id;
+
+-- Build revision mappings (only revisions for migrated nodes)
+INSERT INTO revision_mapping (old_id, new_id)
+SELECT
+    r.id,
+    r.id + current_setting('migration.revision_offset')::BIGINT
+FROM foreign_src.revisions r
+JOIN node_mapping nm ON r.node_id = nm.old_id;
 
 -- =============================================================================
 -- SHOW MAPPING SUMMARY
@@ -208,6 +244,46 @@ BEGIN
     SELECT COUNT(*) INTO ds_count FROM data_source_mapping;
     RAISE NOTICE 'Inserted % data_sources', ds_count;
 END $$;
+
+-- Migrate assets
+INSERT INTO assets (id, data_uri, is_directory, hash_type, hash_content, size, time_created, time_updated)
+SELECT
+    am.new_id,
+    src_a.data_uri,
+    src_a.is_directory,
+    src_a.hash_type,
+    src_a.hash_content,
+    src_a.size,
+    src_a.time_created,
+    src_a.time_updated
+FROM foreign_src.assets src_a
+JOIN asset_mapping am ON src_a.id = am.old_id;
+
+-- Migrate data_source_asset_association
+INSERT INTO data_source_asset_association (data_source_id, asset_id, parameter, num)
+SELECT
+    dsm.new_id,
+    am.new_id,
+    src_dsaa.parameter,
+    src_dsaa.num
+FROM foreign_src.data_source_asset_association src_dsaa
+JOIN data_source_mapping dsm ON src_dsaa.data_source_id = dsm.old_id
+JOIN asset_mapping am ON src_dsaa.asset_id = am.old_id;
+
+-- Migrate revisions
+INSERT INTO revisions (id, node_id, revision_number, metadata, specs, access_blob, time_created, time_updated)
+SELECT
+    rm.new_id,
+    nm.new_id,
+    src_r.revision_number,
+    src_r.metadata,
+    src_r.specs,
+    src_r.access_blob,
+    src_r.time_created,
+    src_r.time_updated
+FROM foreign_src.revisions src_r
+JOIN revision_mapping rm ON src_r.id = rm.old_id
+JOIN node_mapping nm ON src_r.node_id = nm.old_id;
 
 -- =============================================================================
 -- VALIDATION
