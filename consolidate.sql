@@ -67,17 +67,18 @@ CREATE TEMPORARY TABLE data_source_mapping (
 );
 
 -- =============================================================================
--- BUILD NODE MAPPINGS
+-- BUILD NODE MAPPINGS (EXCLUDE ROOT NODE)
 -- =============================================================================
 INSERT INTO node_mapping (old_id, new_id, new_parent)
 SELECT 
     n.id as old_id,
     n.id + current_setting('migration.node_offset')::BIGINT as new_id,
     CASE 
-        WHEN n.parent IS NULL THEN current_setting('migration.graft_parent')::BIGINT
-        ELSE n.parent + current_setting('migration.node_offset')::BIGINT
+        WHEN n.parent = 0 THEN current_setting('migration.graft_parent')::BIGINT  -- Children of root get graft parent
+        ELSE n.parent + current_setting('migration.node_offset')::BIGINT          -- Others get mapped parent
     END as new_parent
-FROM foreign_src.nodes n;
+FROM foreign_src.nodes n
+WHERE n.parent IS NOT NULL;  -- EXCLUDE root node (parent IS NULL)
 
 -- =============================================================================
 -- BUILD DATA_SOURCE MAPPINGS  
@@ -101,7 +102,7 @@ BEGIN
     SELECT COUNT(*) INTO ds_count FROM data_source_mapping;
     SELECT COUNT(*) INTO root_count FROM node_mapping WHERE new_parent = current_setting('migration.graft_parent')::BIGINT;
     
-    RAISE NOTICE 'Will migrate % nodes (% roots) and % data_sources', node_count, root_count, ds_count;
+    RAISE NOTICE 'Will migrate % nodes (% direct children of root) and % data_sources', node_count, root_count, ds_count;
 END $$;
 
 -- =============================================================================
@@ -122,11 +123,31 @@ END $$;
 -- =============================================================================
 BEGIN;
 
-DO $$ BEGIN RAISE NOTICE 'Starting migration...'; END $$;
+DO $$
+BEGIN 
+    RAISE NOTICE 'Starting migration...'; 
+END $$;
+
+-- Migrate structures.
+-- The id is a content hash, so no need to compare content.
+INSERT INTO structures (id, structure)
+SELECT
+    src_s.id,
+    src_s.structure
+FROM foreign_src.structures src_s
+ON CONFLICT (id) DO NOTHING;
+
+DO $$
+DECLARE
+    inserted_count INT;
+BEGIN
+    GET DIAGNOSTICS inserted_count = ROW_COUNT;
+    RAISE NOTICE 'Inserted % structures', inserted_count;
+END $$;
 
 -- Migrate nodes in hierarchical order
 WITH RECURSIVE tree_order AS (
-    -- Start with root nodes (those being grafted)
+    -- Start with children of the original root (those being grafted)
     SELECT 
         nm.old_id, nm.new_id, nm.new_parent, 1 as level
     FROM node_mapping nm
@@ -136,10 +157,10 @@ WITH RECURSIVE tree_order AS (
     
     -- Add children level by level  
     SELECT 
-        nm.old_id, nm.new_id, nm.new_parent, ord.level + 1
+        nm.old_id, nm.new_id, nm.new_parent, parent_order.level + 1
     FROM node_mapping nm
     JOIN foreign_src.nodes src_n ON src_n.id = nm.old_id  
-    JOIN tree_order ord ON src_n.parent = ord.old_id
+    JOIN tree_order parent_order ON src_n.parent = parent_order.old_id
 )
 INSERT INTO nodes (id, parent, key, structure_family, metadata, specs, access_blob, time_created, time_updated)
 SELECT 
@@ -157,7 +178,7 @@ JOIN node_mapping nm ON ord.old_id = nm.old_id
 JOIN foreign_src.nodes src_n ON src_n.id = nm.old_id
 ORDER BY ord.level, nm.new_id;
 
-DO $$ 
+DO $$
 DECLARE inserted_nodes INT;
 BEGIN 
     GET DIAGNOSTICS inserted_nodes = ROW_COUNT;
@@ -180,11 +201,12 @@ FROM foreign_src.data_sources src_ds
 JOIN data_source_mapping dsm ON src_ds.id = dsm.old_id
 JOIN node_mapping nm ON src_ds.node_id = nm.old_id;
 
-DO $$ 
-DECLARE inserted_ds INT;
+DO $$
+DECLARE 
+    ds_count INT;
 BEGIN 
-    GET DIAGNOSTICS inserted_ds = ROW_COUNT;
-    RAISE NOTICE 'Inserted % data_sources', inserted_ds;
+    SELECT COUNT(*) INTO ds_count FROM data_source_mapping;
+    RAISE NOTICE 'Inserted % data_sources', ds_count;
 END $$;
 
 -- =============================================================================
@@ -263,7 +285,7 @@ END $$;
 
 COMMIT;
 
-DO $ 
+DO $$
 BEGIN 
     RAISE NOTICE 'Migration committed successfully!'; 
-END $;
+END $$;
