@@ -1,14 +1,4 @@
--- Fresh Tree Migration Script: Copy from 'src' to 'dst' database
--- Based on actual schema:
--- nodes: id, parent, key, structure_family, metadata, specs, access_blob, time_created, time_updated  
--- data_sources: id, node_id, structure_id, mimetype, parameters, management, structure_family, time_created, time_updated
--- nodes_closure: ancestor, descendant, depth
-
--- =============================================================================
--- CONFIGURATION - Change this to your desired graft point
--- =============================================================================
--- The node ID in dst database where src tree will be attached
-\set graft_parent_id 1
+-- Tree Migration Script: Copy from 'src' to 'dst' database
 
 -- =============================================================================
 -- SETUP FOREIGN DATA WRAPPER
@@ -50,11 +40,12 @@ BEGIN
     RAISE NOTICE 'Max IDs in dst - nodes: %, data_sources: %, assets: %, revisions: %',
                  max_node_id, max_data_source_id, max_asset_id, max_revision_id;
 
+    -- Configure node ID of parent to graph tree onto.
+    PERFORM set_config('migration.graft_parent', '1', false);
     PERFORM set_config('migration.node_offset', max_node_id::text, false);
     PERFORM set_config('migration.data_source_offset', max_data_source_id::text, false);
     PERFORM set_config('migration.asset_offset', max_asset_id::text, false);
     PERFORM set_config('migration.revision_offset', max_revision_id::text, false);
-    PERFORM set_config('migration.graft_parent', :'graft_parent_id', false);
 END $$;
 
 -- =============================================================================
