@@ -66,11 +66,11 @@ with Context.from_app(build_app(catalog_src)) as context:
     for i in range(3):
         logger.info(f"Starting iteration {i}")
         ##### Internal Data Collection #####
-        uid, = RE(bp.count([det], 10))
+        uid, = RE(bp.count([det], 3))
         
         #### External Data Collection #####
         Path("/tmp/catalog-consolidation-data").mkdir(parents=True, exist_ok=True)
-        uid, = RE(bp.count([hw(save_path="/tmp/catalog-consolidation-data").img], 10))
+        uid, = RE(bp.count([hw(save_path="/tmp/catalog-consolidation-data").img], 3))
 
     # Some hierarchical data
     a = client.create_container("a")
@@ -124,8 +124,8 @@ with Context.from_app(build_app(catalog_dst)) as context:
     for i in range(2):
         logger.info(f"Starting iteration {i}")
         ##### Internal Data Collection #####
-        uid, = RE(bp.count([det], 10))
+        uid, = RE(bp.count([det], 3))
         
         #### External Data Collection #####
         Path("/tmp/catalog-consolidation-data").mkdir(parents=True, exist_ok=True)
-        uid, = RE(bp.count([hw(save_path="/tmp/catalog-consolidation-data").img], 10))
+        uid, = RE(bp.count([hw(save_path="/tmp/catalog-consolidation-data").img], 3))
