@@ -1,4 +1,4 @@
--- Tree Migration Script: Copy from 'src' to 'dst' database
+-- Tree Migration Script: Copy from 'catalog_src' to 'catalog_dst' database
 
 -- =============================================================================
 -- SETUP FOREIGN DATA WRAPPER
@@ -9,7 +9,7 @@ DROP SERVER IF EXISTS src_server CASCADE;
 
 CREATE SERVER src_server
 FOREIGN DATA WRAPPER postgres_fdw
-OPTIONS (host 'localhost', port '5432', dbname 'src');
+OPTIONS (host 'localhost', port '5432', dbname 'catalog_src');
 
 CREATE USER MAPPING FOR postgres
 SERVER src_server
@@ -27,21 +27,23 @@ INTO foreign_src;
 -- =============================================================================
 DO $$
 DECLARE
+    root_node_id BIGINT;  -- ID of node under which to graft the imported tree
     max_node_id BIGINT;
     max_data_source_id BIGINT;
     max_asset_id BIGINT;
     max_revision_id BIGINT;
 BEGIN
+    SELECT COALESCE(MAX(id), 0) INTO root_node_id FROM nodes WHERE parent IS NULL;
     SELECT COALESCE(MAX(id), 0) INTO max_node_id FROM nodes;
     SELECT COALESCE(MAX(id), 0) INTO max_data_source_id FROM data_sources;
     SELECT COALESCE(MAX(id), 0) INTO max_asset_id FROM assets;
     SELECT COALESCE(MAX(id), 0) INTO max_revision_id FROM revisions;
 
-    RAISE NOTICE 'Max IDs in dst - nodes: %, data_sources: %, assets: %, revisions: %',
-                 max_node_id, max_data_source_id, max_asset_id, max_revision_id;
+    RAISE NOTICE 'Root ID is %, Max IDs in dst - nodes: %, data_sources: %, assets: %, revisions: %',
+                 root_node_id, max_node_id, max_data_source_id, max_asset_id, max_revision_id;
 
-    -- Configure node ID of parent to graph tree onto.
-    PERFORM set_config('migration.graft_parent', '1', false);
+    -- Configure node ID of parent to graft tree onto.
+    PERFORM set_config('migration.graft_parent', root_node_id::text, false);
     PERFORM set_config('migration.node_offset', max_node_id::text, false);
     PERFORM set_config('migration.data_source_offset', max_data_source_id::text, false);
     PERFORM set_config('migration.asset_offset', max_asset_id::text, false);
@@ -100,13 +102,16 @@ SELECT
 FROM foreign_src.data_sources ds;
 
 -- Build asset mappings (only assets used by migrated data_sources)
+-- If asset already exists in dst (matching data_uri), reuse existing ID
 INSERT INTO asset_mapping (old_id, new_id)
 SELECT DISTINCT
-    a.id,
-    a.id + current_setting('migration.asset_offset')::BIGINT
+    a.id AS old_id,
+    COALESCE(dst.id, a.id + current_setting('migration.asset_offset')::BIGINT) AS new_id
 FROM foreign_src.assets a
 JOIN foreign_src.data_source_asset_association dsaa ON a.id = dsaa.asset_id
-JOIN data_source_mapping dsm ON dsaa.data_source_id = dsm.old_id;
+JOIN data_source_mapping dsm ON dsaa.data_source_id = dsm.old_id
+LEFT JOIN assets dst
+       ON dst.data_uri = a.data_uri;  -- use unique constraint
 
 -- Build revision mappings (only revisions for migrated nodes)
 INSERT INTO revision_mapping (old_id, new_id)
@@ -115,6 +120,29 @@ SELECT
     r.id + current_setting('migration.revision_offset')::BIGINT
 FROM foreign_src.revisions r
 JOIN node_mapping nm ON r.node_id = nm.old_id;
+
+-- =============================================================================
+-- CHECK FOR NAMES COLLISIONS
+-- =============================================================================
+DO $$
+DECLARE
+    collisions INT;
+BEGIN
+    SELECT COUNT(*) INTO collisions
+    FROM (
+        SELECT n.key, np.new_parent
+        FROM foreign_src.nodes n
+        JOIN node_mapping np ON n.id = np.old_id
+        JOIN nodes dst ON dst.parent = np.new_parent AND dst.key = n.key
+        GROUP BY n.key, np.new_parent
+    ) sub;
+
+    IF collisions > 0 THEN
+        RAISE EXCEPTION 'Found % key-parent collisions. Migration cannot proceed.', collisions;
+    ELSE
+        RAISE NOTICE 'No key-parent collisions detected. Safe to migrate.';
+    END IF;
+END $$;
 
 -- =============================================================================
 -- SHOW MAPPING SUMMARY
@@ -236,7 +264,7 @@ BEGIN
     RAISE NOTICE 'Inserted % data_sources', ds_count;
 END $$;
 
--- Migrate assets
+-- Migrate assets: only insert assets that do not exist in destination
 INSERT INTO assets (id, data_uri, is_directory, hash_type, hash_content, size, time_created, time_updated)
 SELECT
     am.new_id,
@@ -248,7 +276,9 @@ SELECT
     src_a.time_created,
     src_a.time_updated
 FROM foreign_src.assets src_a
-JOIN asset_mapping am ON src_a.id = am.old_id;
+JOIN asset_mapping am ON src_a.id = am.old_id
+LEFT JOIN assets dst ON dst.id = am.new_id
+WHERE dst.id IS NULL;  -- skip assets that already exist
 
 -- Migrate data_source_asset_association
 INSERT INTO data_source_asset_association (data_source_id, asset_id, parameter, num)

@@ -1,2 +1,3 @@
-create database src;
-create database dst;
+CREATE DATABASE catalog_src;
+CREATE DATABASE catalog_dst;
+CREATE DATABASE storage;

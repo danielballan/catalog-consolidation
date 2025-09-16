@@ -1,3 +1,4 @@
 POSTGRESQL_URI=postgresql://postgres:secret@localhost:5432 
-psql ${POSTGRESQL_URI} -f clean.sql
+CONTAINER_ID=$(docker ps --format "{{.ID}} {{.Image}}" | grep postgres | awk '{print $1}' | head -n1)
+docker exec -i ${CONTAINER_ID} psql ${POSTGRESQL_URI} -U postgres < clean.sql
 rm -rf /tmp/catalog-consolidation-data
